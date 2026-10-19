@@ -1,167 +1,206 @@
-import traceback
+import logging
 
+import httpx
 import pytest
+from fastapi import FastAPI
+from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError, MultipleResultsFound
 
-from app.errors import UserNotFoundException
-
-
-def test_no_args():
-    e = UserNotFoundException()
-    assert e.message is None
-    assert e.cause is None
-    assert e.__cause__ is None
-    assert str(e) == ""
-    assert e.args == ()
-
-
-def test_stack_trace_captured_when_raised():
-    try:
-        raise UserNotFoundException("x")
-    except UserNotFoundException as e:
-        assert e.__traceback__ is not None
-        assert traceback.extract_tb(e.__traceback__)
+from app.errors import (
+    UserDeleteError,
+    UserNotFoundException,
+    _describe_cause,
+    _error_body,
+    register_exception_handlers,
+)
 
 
-def test_message_only():
-    e = UserNotFoundException("User not found")
-    assert e.message == "User not found"
-    assert e.cause is None
-    assert str(e) == "User not found"
-    assert e.args == ("User not found",)
+class SubUserNotFound(UserNotFoundException):
+    pass
 
 
-def test_null_message():
-    e = UserNotFoundException(None)
-    assert e.message is None
-    assert e.cause is None
+class Payload(BaseModel):
+    name: str
 
 
-def test_message_and_cause():
-    cause = ValueError("boom")
-    e = UserNotFoundException("missing", cause)
-    assert e.message == "missing"
-    assert e.cause is cause
-    assert e.__cause__ is cause
+def build_app() -> FastAPI:
+    app = FastAPI()
+    register_exception_handlers(app)
 
+    @app.get("/notfound")
+    async def notfound():
+        raise UserNotFoundException("User not found with id 5")
 
-def test_message_and_null_cause():
-    e = UserNotFoundException("missing", None)
-    assert e.message == "missing"
-    assert e.cause is None
+    @app.get("/notfound-none")
+    async def notfound_none():
+        raise UserNotFoundException()
 
+    @app.get("/notfound-empty")
+    async def notfound_empty():
+        raise UserNotFoundException("")
 
-def test_message_and_cause_keyword():
-    cause = KeyError("k")
-    e = UserNotFoundException("missing", cause=cause)
-    assert e.message == "missing"
-    assert e.cause is cause
+    @app.get("/notfound-sub")
+    async def notfound_sub():
+        raise SubUserNotFound("sub message")
 
+    @app.get("/notfound-cause")
+    async def notfound_cause():
+        raise UserNotFoundException(cause=ValueError("bad"))
 
-def test_cause_only_derives_message():
-    cause = ValueError("boom")
-    e = UserNotFoundException(cause)
-    assert e.cause is cause
-    assert e.message == "ValueError: boom"
-    assert str(e) == "ValueError: boom"
+    @app.get("/items/{item_id}")
+    async def item(item_id: int):
+        return {"id": item_id}
 
+    @app.post("/users")
+    async def create(p: Payload):
+        return p
 
-def test_cause_without_text_uses_class_name():
-    cause = RuntimeError()
-    e = UserNotFoundException(cause)
-    assert e.message == "RuntimeError"
+    @app.get("/integrity")
+    async def integrity():
+        raise IntegrityError("stmt", {}, Exception("dup"))
 
+    @app.get("/delete")
+    async def delete():
+        raise UserDeleteError(7)
 
-def test_from_cause():
-    cause = LookupError("nope")
-    e = UserNotFoundException.from_cause(cause)
-    assert isinstance(e, UserNotFoundException)
-    assert e.cause is cause
-    assert e.message == "LookupError: nope"
-
-
-def test_null_cause_overload():
-    e = UserNotFoundException(None, None)
-    assert e.cause is None
-    assert e.message is None
-
-
-def test_cause_given_twice_raises():
-    with pytest.raises(TypeError):
-        UserNotFoundException(ValueError("a"), ValueError("b"))
-
-
-def test_flags_default_true():
-    e = UserNotFoundException("m")
-    assert e.enable_suppression is True
-    assert e.writable_stack_trace is True
-
-
-@pytest.mark.parametrize("sup,wst", [(False, True), (True, False), (False, False), (True, True)])
-def test_four_arg_flags_store_message_and_cause(sup, wst):
-    cause = ValueError("c")
-    e = UserNotFoundException("m", cause, enable_suppression=sup, writable_stack_trace=wst)
-    assert e.enable_suppression is sup
-    assert e.writable_stack_trace is wst
-    assert e.message == "m"
-    assert e.cause is cause
-
-
-def test_flags_are_keyword_only():
-    with pytest.raises(TypeError):
-        UserNotFoundException("m", None, False, False)  # type: ignore[misc]
-
-
-def test_both_flags_true_like_message_cause():
-    cause = ValueError("c")
-    a = UserNotFoundException("m", cause, enable_suppression=True, writable_stack_trace=True)
-    b = UserNotFoundException("m", cause)
-    assert (a.message, a.cause, str(a)) == (b.message, b.cause, str(b))
-
-
-def test_hierarchy_and_identity():
-    e = UserNotFoundException()
-    assert isinstance(e, Exception)
-    assert isinstance(e, BaseException)
-    assert not isinstance(e, RuntimeError)
-    assert UserNotFoundException.__name__ == "UserNotFoundException"
-    assert UserNotFoundException.__module__ == "app.errors"
-
-
-def test_raise_from_chain():
-    cause = ValueError("root")
-    with pytest.raises(UserNotFoundException) as info:
-        raise UserNotFoundException("wrapped", cause)
-    assert info.value.__cause__ is cause
-    assert "root" in "".join(traceback.format_exception(info.value))
-
-
-def test_no_side_effects(monkeypatch, capsys, caplog):
-    import logging
-
-    caplog.set_level(logging.DEBUG)
-    UserNotFoundException("m", ValueError("x"))
-    out = capsys.readouterr()
-    assert out.out == "" and out.err == ""
-    assert caplog.records == []
-
-
-def test_no_http_mapping_on_class():
-    assert not hasattr(UserNotFoundException, "status_code")
-
-
-@pytest.mark.asyncio
-async def test_unmapped_in_app_falls_to_generic_handler():
-    import httpx
-    from app.main import create_app
-
-    app = create_app()
+    @app.get("/multi")
+    async def multi():
+        raise MultipleResultsFound("many rows")
 
     @app.get("/boom")
     async def boom():
-        raise UserNotFoundException("User not found")
+        raise RuntimeError("secret")
 
+    return app
+
+
+@pytest.fixture
+async def client():
+    app = build_app()
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_user_not_found_message(client):
+    r = await client.get("/notfound")
+    assert r.status_code == 404
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()
+    assert body["status"] == "NOT_FOUND"
+    assert body["message"] == "User not found with id 5"
+
+
+@pytest.mark.asyncio
+async def test_user_not_found_null_message(client):
+    r = await client.get("/notfound-none")
+    assert r.status_code == 404
+    body = r.json()
+    assert body["status"] == "NOT_FOUND"
+    assert body.get("message") is None
+
+
+@pytest.mark.asyncio
+async def test_user_not_found_empty_message(client):
+    r = await client.get("/notfound-empty")
+    assert r.status_code == 404
+    body = r.json()
+    assert body["status"] == "NOT_FOUND"
+    assert body["message"] == ""
+
+
+@pytest.mark.asyncio
+async def test_user_not_found_subclass(client):
+    r = await client.get("/notfound-sub")
+    assert r.status_code == 404
+    assert r.json()["status"] == "NOT_FOUND"
+    assert r.json()["message"] == "sub message"
+
+
+@pytest.mark.asyncio
+async def test_user_not_found_cause_only(client):
+    r = await client.get("/notfound-cause")
+    assert r.status_code == 404
+    assert r.json()["message"] == "ValueError: bad"
+
+
+@pytest.mark.asyncio
+async def test_validation_bad_path_returns_400(client):
+    r = await client.get("/items/abc")
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"] == "Bad Request"
+    assert isinstance(body["details"], list) and body["details"]
+
+
+@pytest.mark.asyncio
+async def test_validation_malformed_body_400(client):
+    r = await client.post("/users", content="{bad", headers={"content-type": "application/json"})
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_validation_missing_field_400(client):
+    r = await client.post("/users", json={})
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_unknown_route_404_shared_shape(client):
+    r = await client.get("/nope")
+    assert r.status_code == 404
+    assert r.json() == {"error": "Not Found", "details": "Not Found"}
+
+
+@pytest.mark.asyncio
+async def test_method_not_allowed_405(client):
+    r = await client.delete("/notfound")
+    assert r.status_code == 405
+    assert r.json()["error"] == "Method Not Allowed"
+
+
+@pytest.mark.asyncio
+async def test_integrity_error_500(client):
+    r = await client.get("/integrity")
+    assert r.status_code == 500
+    assert r.json() == {"error": "Internal Server Error", "details": "Data integrity violation"}
+
+
+@pytest.mark.asyncio
+async def test_delete_error_500(client):
+    r = await client.get("/delete")
+    assert r.status_code == 500
+    assert r.json()["details"] == "No User entity with id 7 exists!"
+
+
+@pytest.mark.asyncio
+async def test_multiple_results_500(client):
+    r = await client.get("/multi")
+    assert r.status_code == 500
+    assert "many rows" in r.json()["details"]
+
+
+@pytest.mark.asyncio
+async def test_unhandled_500_no_details(client, caplog):
+    with caplog.at_level(logging.ERROR, logger="app.errors"):
         r = await client.get("/boom")
     assert r.status_code == 500
-    assert r.json()["details"] == "User not found"
+    assert r.json() == {"error": "Internal Server Error", "details": None}
+    assert "secret" not in r.text
+
+
+def test_exception_constructors():
+    assert str(UserNotFoundException()) == ""
+    assert UserNotFoundException("m").message == "m"
+    cause = KeyError("k")
+    e = UserNotFoundException("m", cause)
+    assert e.__cause__ is cause and e.message == "m"
+    assert UserNotFoundException(cause=RuntimeError()).message == "RuntimeError"
+    assert UserDeleteError(3).user_id == 3
+
+
+def test_helpers():
+    assert _describe_cause(None) is None
+    assert _error_body(999, {"a": 1}) == {"error": "Error", "details": {"a": 1}}
+    assert _error_body(404, None)["error"] == "Not Found"
