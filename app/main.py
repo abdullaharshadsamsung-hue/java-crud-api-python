@@ -13,10 +13,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.requests import Request
 
 from app.config import settings
+from app.errors import register_exception_handlers
+
+# Importing the router also imports app.models.user, which registers the
+# User table on Base.metadata so init_db() creates it at startup.
+from app.routers.users import router as users_router
 
 
 @asynccontextmanager
@@ -41,16 +44,15 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    @app.exception_handler(Exception)
-    async def unhandled_exception_handler(request: Request, exc: Exception):
-        return JSONResponse(
-            status_code=500,
-            content={"error": "internal server error", "details": str(exc)},
-        )
+    # Global exception handlers (port of the Spring @ControllerAdvice),
+    # including the catch-all Exception handler.
+    register_exception_handlers(app)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    app.include_router(users_router)
 
     return app
 
