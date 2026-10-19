@@ -132,9 +132,12 @@ async def fetch_user_list(service: ServiceDep) -> list[UserOut]:
 
 
 @router.get("/get_user_data/{id}", response_model=UserOut)
-async def fetch_user_by_id(user_id: UserId, service: ServiceDep) -> UserOut:
+async def fetch_user_by_id(
+    id: Annotated[int, Path(ge=_JAVA_INT_MIN, le=_JAVA_INT_MAX)],
+    service: ServiceDep,
+) -> UserOut:
     """Return one user. ``UserNotFoundException`` becomes a 404 in app/errors.py."""
-    user = await service.fetch_user_by_id(user_id)
+    user = await service.fetch_user_by_id(id)
     return UserOut.model_validate(user)
 
 
