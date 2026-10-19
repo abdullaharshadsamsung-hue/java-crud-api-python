@@ -157,6 +157,9 @@ class UserRepository:
 
     async def find_by_id(self, user_id: int) -> User | None:
         """``findById`` — ``None`` replaces ``Optional.empty()``."""
+        if user_id is None:
+            # Spring Data: "The given id must not be null!"
+            raise ValueError("The given id must not be null!")
         return await self._run(lambda: self._session.get(User, user_id))
 
     async def exists_by_id(self, user_id: int) -> bool:
