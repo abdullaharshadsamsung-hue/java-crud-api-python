@@ -77,6 +77,9 @@ class UserIn(BaseModel):
 class UserCreate(UserIn):
     """Request body for POST. Ports ``@NotBlank(message = "please Add the department Name")``."""
 
+    # A missing name must also fail @NotBlank, so validate defaults too.
+    model_config = ConfigDict(extra="ignore", validate_default=True)
+
     @field_validator("name")
     @classmethod
     def _name_not_blank(cls, value: str | None) -> str | None:
