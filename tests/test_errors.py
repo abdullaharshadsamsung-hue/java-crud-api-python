@@ -2,6 +2,7 @@ import logging
 
 import httpx
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError, MultipleResultsFound
@@ -74,7 +75,7 @@ def build_app() -> FastAPI:
     return app
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client():
     app = build_app()
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
